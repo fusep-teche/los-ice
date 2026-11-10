@@ -1,4 +1,4 @@
-name: LineageOS 22.2 (Redmi A1+ / ice)
+name: LineageOS 22.2 build (Xiaomi ice)
 
 on:
   workflow_dispatch:
@@ -6,90 +6,91 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    timeout-minutes: 360
+
     steps:
-      - name: Setup disk space (compressed btrfs)
+      - name: Free disk space
         run: |
-          set -e
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost /var/lib/docker 2>/dev/null || true
-          sudo apt-get remove -y --purge azure-cli google-chrome-stable firefox microsoft-edge-stable 2>/dev/null || true
-          sudo apt-get install -y btrfs-progs
-          if sudo modprobe btrfs 2>/dev/null && [ -e /dev/btrfs-control -o "$(grep -c btrfs /proc/filesystems)" != "0" ]; then
-            echo "BTRFS supported, creating compressed volume"
-            sudo truncate -s 75G /build.img
-            sudo mkfs.btrfs -q /build.img
-            sudo mount -o compress=zstd:15,noatime /build.img $GITHUB_WORKSPACE
-            sudo chown -R runner:runner $GITHUB_WORKSPACE
-            echo "BTRFS=yes" >> $GITHUB_ENV
-            sudo fallocate -l 8G /mnt/swap2 && sudo chmod 600 /mnt/swap2
-            sudo mkswap /mnt/swap2 && sudo swapon /mnt/swap2 || true
-          else
-            echo "No btrfs, will use fallback"
-            echo "BTRFS=no" >> $GITHUB_ENV
-          fi
-          df -h /
+          sudo swapoff -a || true
+          sudo rm -f /swapfile /mnt/swapfile || true
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+            /usr/local/.ghc /usr/local/share/boost /usr/local/share/graalvm \
+            /usr/lib/jvm /opt/hostedtoolcache
+          sudo docker image prune -af || true
+          sudo apt-get clean
+          df -hT /
 
-      - name: Maximize disk space (fallback)
-        if: env.BTRFS != 'yes'
-        uses: easimon/maximize-build-space@master
-        with:
-          root-reserve-mb: 2048
-          temp-reserve-mb: 128
-          swap-size-mb: 512
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
-          remove-docker-images: 'true'
+      - name: Create swap
+        run: |
+          sudo fallocate -l 8G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
 
-      - name: Install dependencies
+      - name: Create 75G btrfs build volume (zstd compression)
         run: |
           sudo apt-get update
-          sudo apt-get install -y git-core gnupg flex bison build-essential zip curl \
-            zlib1g-dev libc6-dev-i386 libncurses-dev libx11-dev lib32z1-dev \
-            libgl1-mesa-dev libxml2-utils xsltproc unzip fontconfig rsync wget
+          sudo apt-get install -y btrfs-progs
+          sudo truncate -s 75G /build.img
+          sudo mkfs.btrfs -f /build.img
+          sudo mount -o compress=zstd:15,loop /build.img "$GITHUB_WORKSPACE"
+          sudo chown -R runner:runner "$GITHUB_WORKSPACE"
+          df -hT "$GITHUB_WORKSPACE"
 
-      - name: Init and sync sources
+      - name: Install build dependencies
         run: |
-          cd $GITHUB_WORKSPACE
-          git config --global user.email "builder@users.noreply.github.com"
-          git config --global user.name "builder"
-          sudo curl -o /usr/local/bin/repo https://storage.googleapis.com/git-repo-downloads/repo
-          sudo chmod a+x /usr/local/bin/repo
+          sudo apt-get install -y bc bison build-essential ccache curl flex \
+            g++-multilib gcc-multilib git git-lfs gnupg jq libarchive-tools \
+            libelf-dev libssl-dev lz4 mtools ninja-build openjdk-17-jdk-headless \
+            python3-filelock python3-pip rsync squashfs-tools unzip xmlstarlet \
+            xsltproc zip zlib1g-dev
+          mkdir -p "$HOME/.local/bin"
+          curl -s https://storage.googleapis.com/git-repo-downloads/repo > "$HOME/.local/bin/repo"
+          chmod a+x "$HOME/.local/bin/repo"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Sync sources
+        run: |
+          git config --global user.name "ROM Builder"
+          git config --global user.email "builder@example.com"
+          cd "$GITHUB_WORKSPACE"
+          repo init -u https://github.com/LineageOS/android.git -b lineage-22.2 --depth=1
           mkdir -p .repo/local_manifests
-          cat > .repo/local_manifests/ice.xml <<'EOF'
+          cat > .repo/local_manifests/ice.xml << 'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <manifest>
             <remote name="jagatg" fetch="https://github.com/" />
             <project name="Jagatg/android_device_xiaomi_ice" path="device/xiaomi/ice" remote="jagatg" revision="lineage-22.2" />
             <project name="Jagatg/proprietary_android_device_xiaomi_ice" path="vendor/xiaomi/ice" remote="jagatg" revision="lineage-22.2" />
+            <project name="Jagatg/android_hardware_mediatek" path="hardware/mediatek" remote="jagatg" revision="17.0" />
+            <project name="Jagatg/device_mediatek_sepolicy_vndr" path="device/mediatek/sepolicy_vndr" remote="jagatg" revision="lineage-19.1" />
           </manifest>
           EOF
-          repo init -u https://github.com/LineageOS/android.git -b lineage-22.2 --depth=1
-          for i in 1 2 3; do repo sync -c --no-tags --no-clone-bundle -j8 --fail-fast && break; sleep 10; done
-          df -h .
-          du -sh . 2>/dev/null || true
+          repo sync -c -j8 --no-tags
 
       - name: Build
         run: |
-          cd $GITHUB_WORKSPACE
+          cd "$GITHUB_WORKSPACE"
           source build/envsetup.sh
           breakfast ice
           mka bacon WITH_DEXPREOPT=false
-          df -h .
-          ls -lh out/target/product/ice/*.zip || true
 
       - name: Upload ROM
         uses: actions/upload-artifact@v4
         with:
           name: lineage-22.2-ice
-          path: out/target/product/ice/lineage-*.zip
+          path: out/target/product/ice/lineage-22.2-*-UNOFFICIAL-ice.zip
 
       - name: Upload fastboot images
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: ice-fastboot-images
           path: |
             out/target/product/ice/boot.img
             out/target/product/ice/dtbo.img
-            out/target/product/ice/vbmeta*.img
+            out/target/product/ice/vbmeta.img
+            out/target/product/ice/vbmeta_system.img
+            out/target/product/ice/vbmeta_vendor.img
+          if-no-files-found: warn
