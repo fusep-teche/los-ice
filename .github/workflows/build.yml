@@ -18,7 +18,7 @@ jobs:
             /usr/lib/jvm /opt/hostedtoolcache
           sudo docker image prune -af || true
           sudo apt-get clean
-          df -hT /
+          df -hT / /mnt
 
       - name: Create swap
         run: |
@@ -28,15 +28,22 @@ jobs:
           sudo swapon /swapfile
           free -h
 
-      - name: Create 75G btrfs build volume (zstd compression)
+      - name: Create btrfs build volume
         run: |
           sudo apt-get update
           sudo apt-get install -y btrfs-progs
-          sudo truncate -s 75G /build.img
-          sudo mkfs.btrfs -f /build.img
-          sudo mount -o compress=zstd:15,loop /build.img "$GITHUB_WORKSPACE"
+          sudo truncate -s 75G /mnt/build.img
+          sudo mkfs.btrfs -f /mnt/build.img
+          sudo mount -o compress=zstd:3,loop /mnt/build.img "$GITHUB_WORKSPACE"
           sudo chown -R runner:runner "$GITHUB_WORKSPACE"
           df -hT "$GITHUB_WORKSPACE"
+
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.ccache
+          key: ccache-ice-${{ github.run_id }}
+          restore-keys: ccache-ice-
 
       - name: Install build dependencies
         run: |
@@ -45,6 +52,7 @@ jobs:
             libelf-dev libssl-dev lz4 mtools ninja-build openjdk-17-jdk-headless \
             python3-filelock python3-pip rsync squashfs-tools unzip xmlstarlet \
             xsltproc zip zlib1g-dev
+          git lfs install
           mkdir -p "$HOME/.local/bin"
           curl -s https://storage.googleapis.com/git-repo-downloads/repo > "$HOME/.local/bin/repo"
           chmod a+x "$HOME/.local/bin/repo"
@@ -55,7 +63,7 @@ jobs:
           git config --global user.name "ROM Builder"
           git config --global user.email "builder@example.com"
           cd "$GITHUB_WORKSPACE"
-          repo init -u https://github.com/LineageOS/android.git -b lineage-22.2 --depth=1
+          repo init -u https://github.com/LineageOS/android.git -b lineage-22.2 --depth=1 --git-lfs
           mkdir -p .repo/local_manifests
           cat > .repo/local_manifests/ice.xml << 'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
@@ -67,14 +75,26 @@ jobs:
             <project name="Jagatg/device_mediatek_sepolicy_vndr" path="device/mediatek/sepolicy_vndr" remote="jagatg" revision="lineage-19.1" />
           </manifest>
           EOF
-          repo sync -c -j8 --no-tags
+          repo sync -c -j8 --no-tags --no-clone-bundle --force-sync
 
       - name: Build
+        timeout-minutes: 270
         run: |
           cd "$GITHUB_WORKSPACE"
+          export USE_CCACHE=1
+          export CCACHE_EXEC=/usr/bin/ccache
+          export CCACHE_DIR="$HOME/.ccache"
+          ccache -M 8G
           source build/envsetup.sh
           breakfast ice
           mka bacon WITH_DEXPREOPT=false
+
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.ccache
+          key: ccache-ice-${{ github.run_id }}
 
       - name: Upload ROM
         uses: actions/upload-artifact@v4
