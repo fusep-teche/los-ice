@@ -46,17 +46,11 @@ jobs:
           for i in 1 2 3; do repo sync -c --no-tags --no-clone-bundle -j8 && break; done
           df -h .
 
-      - name: Breakfast
-        run: |
-          cd $GITHUB_WORKSPACE
-          source build/envsetup.sh
-          breakfast lineage_ice-userdebug
-
       - name: Build
         run: |
           cd $GITHUB_WORKSPACE
           source build/envsetup.sh
-          export USE_CCACHE=0
+          breakfast ice
           mka bacon WITH_DEXPREOPT=false
           df -h .
 
